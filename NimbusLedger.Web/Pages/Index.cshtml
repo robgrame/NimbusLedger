@@ -1,0 +1,143 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Hybrid Join Monitor";
+}
+
+<div class="container py-4">
+    <header class="mb-4">
+        <h1 class="display-6">Hybrid Join Ledger</h1>
+        <p class="text-muted mb-0">Activity window: last @Model.ActivityWindowDays day(s)</p>
+        @if (Model.Snapshot is not null)
+        {
+            <p class="text-muted">Last reconciled @Model.Snapshot.CapturedAt.ToLocalTime().ToString("f")</p>
+        }
+    </header>
+
+    @if (Model.Snapshot is null)
+    {
+        <div class="alert alert-warning" role="alert">
+            The worker has not produced a snapshot yet. Verify that the background service is running and that configuration values are correct.
+        </div>
+    }
+    else if (Model.Metrics is not null)
+    {
+        <section class="row g-3 mb-4">
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <p class="text-uppercase text-secondary fw-semibold mb-1">Active Directory</p>
+                        <p class="display-6 fw-bold mb-0">@Model.Metrics.ActiveDirectoryCount</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <p class="text-uppercase text-secondary fw-semibold mb-1">Entra ID</p>
+                        <p class="display-6 fw-bold mb-0">@Model.Metrics.EntraCount</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <p class="text-uppercase text-secondary fw-semibold mb-1">Intune</p>
+                        <p class="display-6 fw-bold mb-0">@Model.Metrics.IntuneCount</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-md-6 col-xl-3">
+                <div class="card shadow-sm h-100 border-warning">
+                    <div class="card-body">
+                        <p class="text-uppercase text-secondary fw-semibold mb-1">Stale Devices</p>
+                        <p class="display-6 fw-bold mb-0 text-warning">@Model.Metrics.StaleDevicesCount</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="row g-4">
+            <div class="col-12 col-xl-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-transparent">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h2 class="h5 mb-0">Missing in Entra ID</h2>
+                            <span class="badge bg-danger">@Model.Metrics.MissingInEntraCount</span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        @if (Model.Metrics.MissingInEntraCount == 0)
+                        {
+                            <p class="p-3 mb-0 text-success">All scoped devices are present in Entra ID.</p>
+                        }
+                        else
+                        {
+                            <div class="table-responsive">
+                                <table class="table table-striped table-hover mb-0 align-middle">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th scope="col">Computer</th>
+                                            <th scope="col">Last Logon</th>
+                                            <th scope="col">DNS</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var computer in Model.Snapshot.MissingInEntra.OrderBy(c => c.SamAccountName))
+                                        {
+                                            <tr>
+                                                <td>@computer.SamAccountName</td>
+                                                <td>@(computer.LastLogonTimestamp?.ToLocalTime().ToString("g") ?? "Unknown")</td>
+                                                <td>@(computer.DnsHostName ?? "-")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-xl-6">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header bg-transparent">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h2 class="h5 mb-0">Missing in Intune</h2>
+                            <span class="badge bg-warning text-dark">@Model.Metrics.MissingInIntuneCount</span>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        @if (Model.Metrics.MissingInIntuneCount == 0)
+                        {
+                            <p class="p-3 mb-0 text-success">All scoped devices are present in Intune.</p>
+                        }
+                        else
+                        {
+                            <div class="table-responsive">
+                                <table class="table table-striped table-hover mb-0 align-middle">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th scope="col">Computer</th>
+                                            <th scope="col">Last Logon</th>
+                                            <th scope="col">DNS</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var computer in Model.Snapshot.MissingInIntune.OrderBy(c => c.SamAccountName))
+                                        {
+                                            <tr>
+                                                <td>@computer.SamAccountName</td>
+                                                <td>@(computer.LastLogonTimestamp?.ToLocalTime().ToString("g") ?? "Unknown")</td>
+                                                <td>@(computer.DnsHostName ?? "-")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </section>
+    }
+</div>
