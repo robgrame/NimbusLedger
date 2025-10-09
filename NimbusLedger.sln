@@ -4,6 +4,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 VisualStudioVersion = 18.0.11018.127
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{EB552C4A-65E7-41B4-9957-FE32EA23ABFF}"
+	ProjectSection(SolutionItems) = preProject
+		docs\DEPLOYMENT.md = docs\DEPLOYMENT.md
+	EndProjectSection
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NimbusLedger.Core", "NimbusLedger.Core\NimbusLedger.Core.csproj", "{C8D69755-8920-78F0-9F08-DF58F91D0907}"
 EndProject
