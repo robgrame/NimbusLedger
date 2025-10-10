@@ -9,9 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Azure.Identity" Version="1.16.0" />
+    <PackageReference Include="Azure.Identity" Version="1.17.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.9" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="9.0.9" />
-    <PackageReference Include="Microsoft.Graph" Version="5.93.0" />
+    <PackageReference Include="Microsoft.Graph" Version="5.94.0" />
     <PackageReference Include="System.DirectoryServices.Protocols" Version="9.0.9" />
   </ItemGroup>
 
