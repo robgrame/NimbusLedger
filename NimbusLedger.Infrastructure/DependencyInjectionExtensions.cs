@@ -1,4 +1,5 @@
 using Azure.Identity;
+using Azure.Core; // Added for TokenCredential
 using NimbusLedger.Core.Abstractions;
 using NimbusLedger.Core.Options;
 using NimbusLedger.Infrastructure.ActiveDirectory;
@@ -28,25 +29,41 @@ public static class DependencyInjectionExtensions
         services.AddSingleton(provider =>
         {
             var options = provider.GetRequiredService<IOptions<HybridLedgerOptions>>().Value;
-            var credentialOptions = new DefaultAzureCredentialOptions
+            GraphOptions graph = options.Graph;
+
+            TokenCredential credential;
+            if (!string.IsNullOrWhiteSpace(graph.TenantId) &&
+                !string.IsNullOrWhiteSpace(graph.ClientId) &&
+                !string.IsNullOrWhiteSpace(graph.ClientSecret))
             {
-                VisualStudioTenantId = options.Graph.TenantId,
-                SharedTokenCacheTenantId = options.Graph.TenantId
+                credential = new ClientSecretCredential(graph.TenantId, graph.ClientId, graph.ClientSecret);
+            }
+            else
+            {
+                var credentialOptions = new DefaultAzureCredentialOptions
+                {
+                    VisualStudioTenantId = graph.TenantId,
+                    SharedTokenCacheTenantId = graph.TenantId
+                };
+
+                if (!string.IsNullOrWhiteSpace(graph.ClientId))
+                {
+                    credentialOptions.ManagedIdentityClientId = graph.ClientId;
+                }
+
+                if (!string.IsNullOrWhiteSpace(graph.TenantId))
+                {
+                    credentialOptions.TenantId = graph.TenantId;
+                }
+
+                credential = new DefaultAzureCredential(credentialOptions);
+            }
+
+            var client = new GraphServiceClient(credential, graph.Scopes)
+            {
+                // Configure request timeout if needed via middleware (placeholder; Graph SDK v5 uses HttpClientFactory internally soon)
             };
-
-            if (!string.IsNullOrWhiteSpace(options.Graph.ClientId))
-            {
-                credentialOptions.ManagedIdentityClientId = options.Graph.ClientId;
-            }
-
-            if (!string.IsNullOrWhiteSpace(options.Graph.TenantId))
-            {
-                credentialOptions.TenantId = options.Graph.TenantId;
-            }
-
-            var credential = new DefaultAzureCredential(credentialOptions);
-
-            return new GraphServiceClient(credential, options.Graph.Scopes);
+            return client;
         });
 
         return services;

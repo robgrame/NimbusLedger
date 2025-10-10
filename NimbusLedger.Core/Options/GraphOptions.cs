@@ -11,10 +11,15 @@ public sealed class GraphOptions
     public string TenantId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Optional client identifier when using workload identities. Not required for managed identity.
+    /// Optional client identifier when using workload identities or client secret.
     /// </summary>
-    public string? ClientId { get; set; }
-        = null;
+    public string? ClientId { get; set; } = null;
+
+    /// <summary>
+    /// Optional client secret (NOT recommended for production storage in plain text). If provided
+    /// the application will use a confidential client credential flow instead of DefaultAzureCredential.
+    /// </summary>
+    public string? ClientSecret { get; set; } = null;
 
     /// <summary>
     /// The scopes requested when acquiring Graph tokens. Defaults to .default.
