@@ -9,4 +9,9 @@ public sealed class SccmCleanupOptions
     public string? Domain { get; set; }
     public int InactiveDaysThreshold { get; set; } = 90;
     public int ObsoleteDaysThreshold { get; set; } = 7;
+    public bool CleanupEnabled { get; set; } = false;
+    public bool DryRun { get; set; } = true;
+    public int[] AllowedResourceIds { get; set; } = [];
+    public int[] ExcludedResourceIds { get; set; } = [];
+    public int MaxDeletesPerRun { get; set; } = 5;
 }

@@ -1,157 +1,144 @@
-# On-Premises Deployment Guide (No Azure Services)
+# NimbusLedger deployment and pilot validation
 
-Scope: Deploy `AdIntuneLedger.Worker` as a Windows Service and `AdIntuneLedger.Web` behind IIS on Windows Server, using local/server resources only. This guide assumes domain-joined servers and no use of Azure PaaS services.
+The supported initial topology is a domain-connected Windows worker plus an IIS
+or Kestrel dashboard. Version 2.0.3 targets .NET 10. Azure hosting is not configured
+by this repository; LDAP connectivity and Windows authentication must not be
+assumed to work on an arbitrary public web app.
 
-- Worker: background reconciliation generating snapshots and logs.
-- Web: Razor Pages dashboard reading the latest snapshot.
-- Optional: SCCM cleanup module using the Configuration Manager Admin Service.
-- Optional: Cloud cleanup (Entra/Intune) with Intune-freshness protection and dry-run mode.
+## 1. Prepare identities, connectivity and storage
 
-1) Prepare servers
-- OS: Windows Server 2019/2022 (domain-joined).
-- Networking:
-  - Worker ? Domain Controllers (LDAP/LDAPS): TCP 389/636 as required.
-  - Worker ? Microsoft Graph (if used): TCP 443 outbound.
-  - Worker ? SCCM Admin Service (if used): TCP 443 outbound to your site server AdminService URL.
-  - Web ? Clients: TCP 443 inbound.
-  - Web ? Worker shared storage: if using UNC for snapshots.
-- Software:
-  - Worker and Web: Install the .NET runtime matching the project target (e.g., .NET runtime supporting the target framework).
-  - Web only: Install ASP.NET Core Hosting Bundle for IIS integration.
-  - IIS role: Web-Server, Web-WebServer, Web-Http-Redirect, Web-Request-Monitor, Web-Log-Libraries, and required ASP.NET Core Module (installed by hosting bundle).
-- Certificates:
-  - Web: Server certificate for HTTPS binding in IIS.
-  - LDAPS: Ensure the server trusts the DC’s LDAPS certificate chain.
-  - SCCM Admin Service: Ensure the worker trusts the site server TLS chain.
+- Install the .NET 10 runtime for the worker and ASP.NET Core Hosting Bundle for IIS.
+- Permit outbound LDAPS and HTTPS to the configured directory, Graph and optional
+  AdminService. Trust the real issuing CA; certificate bypass is rejected.
+- Start with LDAP read permissions and Graph application read permissions only.
+  Run under a dedicated service identity or gMSA as appropriate. Do not grant delete
+  permissions during the read-only pilot.
+- Configure a real app-only Graph identity. Placeholders in sample settings are
+  not usable credentials. Managed identity requires a host that actually provides it.
+- Use a shared absolute snapshot path, for example `C:\Apps\NimbusLedger\data`.
+  Grant worker Modify and dashboard Read. Restrict access to authorized operators.
+- Keep the execution lease, snapshots and audit on storage whose locking and
+  atomic-replacement behavior has been validated. Do not run independent workers
+  against independent copies of the same configuration and assume a global budget.
 
-2) Service accounts and identities
-- Active Directory access:
-  - Create a domain service account (least privilege) with rights to query LDAP and read `lastLogonTimestamp`.
-  - Grant “Log on as a service” right on the worker server.
-- Microsoft Graph (if used):
-  - Use an app registration with application permissions for read and optionally delete operations you enable.
-  - Grant admin consent.
-- SCCM Admin Service (optional):
-  - Run the worker under an account authorized to call the Admin Service (RBAC permissions to read devices and delete resources).
+## 2. Build and publish
 
-3) Build and publish artifacts
-- On a build machine/dev box, from the repository root:
-  - Publish worker: `dotnet publish AdIntuneLedger.Worker -c Release -o publish\worker`
-  - Publish web: `dotnet publish AdIntuneLedger.Web -c Release -o publish\web`
-- Copy the contents of `publish\worker` and `publish\web` to the target servers.
+From the repository root:
 
-4) Layout on servers
-- Create application folders (example):
-  - `C:\Apps\AdIntuneLedger\Worker`
-  - `C:\Apps\AdIntuneLedger\Web`
-  - `C:\Apps\AdIntuneLedger\data`
-  - `C:\Apps\AdIntuneLedger\logs`
-- Permissions:
-  - Grant Modify to the worker service account on `data` and `logs`.
-  - Grant Read (or Modify if needed) to the IIS App Pool identity on `data` and Read on `Web` folder.
-  - If using a UNC path for `data`, grant share and NTFS permissions to both identities.
+```powershell
+dotnet test NimbusLedger.Tests\NimbusLedger.Tests.csproj -c Release
+dotnet publish NimbusLedger.Worker -c Release -o publish\worker
+dotnet publish NimbusLedger.Web -c Release -o publish\web
+```
 
-5) Configure application settings
-- Each app reads the `HybridLedger` section. Recommended: use environment variables for secrets and machine-specific paths.
-- Critical settings:
-  - `HybridLedger:ActiveDirectory` ? `LdapServer`, `Port`, `UseSsl`, `BaseDn`, `ActivityWindowDays`, `Username`, `Password`.
-  - `HybridLedger:Graph` ? `TenantId`, `Scopes`.
-  - `HybridLedger:Snapshot` ? `RootPath` (use an absolute path, e.g., `C:\Apps\AdIntuneLedger\data`) and `LatestFileName`.
-  - `HybridLedger:Scheduler` ? `Interval`, `StartupDelay` (worker only).
-  - Optional Cleanup (cloud):
-    - `HybridLedger:Cleanup:Enabled` (true|false)
-    - `HybridLedger:Cleanup:DeleteEntra` (true|false)
-    - `HybridLedger:Cleanup:DeleteIntune` (true|false)
-    - `HybridLedger:Cleanup:DryRun` (true|false; default true)
-    - `HybridLedger:Cleanup:IntuneFreshWindowDays` (default 30)
-    - Behavior: If AD object is stale/missing but Intune has a recent check-in within the freshness window, deletion is suppressed and an inconsistency is logged.
-  - Optional SCCM cleanup:
-    - `HybridLedger:Sccm:Enabled` (true|false)
-    - `HybridLedger:Sccm:AdminServiceBaseUrl` (e.g., `https://cmserver.contoso.com/CCM_Proxy_ServerAuth/`)
-    - `HybridLedger:Sccm:InactiveDaysThreshold` (default 90)
-    - `HybridLedger:Sccm:ObsoleteDaysThreshold` (default 7)
-- Set machine-level environment variables (examples):
-  - `ASPNETCORE_ENVIRONMENT=Production`
-  - `HYBRIDLEDGER__SNAPSHOT__ROOTPATH=C:\Apps\AdIntuneLedger\data`
-  - `HYBRIDLEDGER__ACTIVEDIRECTORY__LDAPSERVER=dc1.contoso.com`
-  - `HYBRIDLEDGER__ACTIVEDIRECTORY__USESSL=true`
-  - `HYBRIDLEDGER__ACTIVEDIRECTORY__BASEDN=DC=contoso,DC=com`
-  - `HYBRIDLEDGER__ACTIVEDIRECTORY__USERNAME=CONTOSO\svc-hybridledger`
-  - `HYBRIDLEDGER__ACTIVEDIRECTORY__PASSWORD=...` (secure)
-  - `HYBRIDLEDGER__GRAPH__TENANTID=00000000-0000-0000-0000-000000000000`
-  - Optional Cleanup:
-    - `HYBRIDLEDGER__CLEANUP__ENABLED=true`
-    - `HYBRIDLEDGER__CLEANUP__DELETEENTRA=true`
-    - `HYBRIDLEDGER__CLEANUP__DELETEINTUNE=false`
-    - `HYBRIDLEDGER__CLEANUP__DRYRUN=true`
-    - `HYBRIDLEDGER__CLEANUP__INTUNEFRESHWINDOWDAYS=30`
-  - Optional SCCM:
-    - `HYBRIDLEDGER__SCCM__ENABLED=true`
-    - `HYBRIDLEDGER__SCCM__ADMINSERVICEBASEURL=https://cmserver.contoso.com/CCM_Proxy_ServerAuth/`
+Inspect deployment configuration locally before transferring artifacts. Build
+output includes appsettings files; never distribute a developer's secrets or
+customer-specific settings as a generic package.
 
-6) Install the worker as a Windows Service
-- Ensure the worker is built with Windows Service hosting (the generic host with Windows Service integration).
-- On the worker server, place files in `C:\Apps\AdIntuneLedger\Worker`.
-- Create the service (example):
-  - `sc create "AdIntuneLedger.Worker" binPath= "C:\Apps\AdIntuneLedger\Worker\AdIntuneLedger.Worker.exe" start= auto`
-  - Set service logon: `sc config "AdIntuneLedger.Worker" obj= "CONTOSO\svc-hybridledger" password= "<secure>"`
-  - Configure failure recovery (optional): `sc failure "AdIntuneLedger.Worker" reset= 86400 actions= restart/600/restart/600/restart/600`
-- Start the service: `sc start "AdIntuneLedger.Worker"`
+## 3. Configure the worker
 
-7) Deploy the web app to IIS
-- Install IIS and the ASP.NET Core Hosting Bundle on the web server.
-- Copy published files to `C:\Apps\AdIntuneLedger\Web`.
-- Create an Application Pool:
-  - .NET CLR: No Managed Code
-  - 64-bit: Enabled
-  - Identity: Custom (if you need UNC access to `data`) or `ApplicationPoolIdentity`.
-- Create a Site:
-  - Physical path: `C:\Apps\AdIntuneLedger\Web`
-  - Binding: `https` on 443 with the server certificate.
-  - Host name: your chosen DNS name.
-- Grant the app pool identity permissions to read `Web` and read `data` (or modify if needed).
-- Configure environment variables for the site (Configuration Editor or machine-level env): ensure `HYBRIDLEDGER__SNAPSHOT__ROOTPATH` matches the worker’s output location.
-- Recycle the application pool or restart the site.
+Use environment variables or an approved secret provider. Standard hierarchical
+keys use double underscores:
 
-8) Firewall and TLS
-- Web server: allow inbound TCP 443.
-- Worker server: allow outbound TCP 443 to Microsoft Graph endpoints if used and to SCCM Admin Service if enabled.
-- Ensure LDAPS trust: import required issuing CA certificates so LDAPS validation succeeds.
+```powershell
+$env:HybridLedger__ActiveDirectory__LdapServer = 'dc.example.com'
+$env:HybridLedger__ActiveDirectory__BaseDn = 'DC=example,DC=com'
+$env:HybridLedger__ActiveDirectory__UseSsl = 'true'
+$env:HybridLedger__Snapshot__RootPath = 'C:\Apps\NimbusLedger\data'
+$env:HybridLedger__Cleanup__Enabled = 'false'
+$env:HybridLedger__Cleanup__DryRun = 'true'
+$env:HybridLedger__Sccm__Enabled = 'false'
+```
 
-9) Validation checklist
-- Worker:
-  - Service status is Running.
-  - `C:\Apps\AdIntuneLedger\data\latest-snapshot.json` appears after first run, and `logs` contains structured log files.
-  - If Cleanup is enabled, logs show deletions or “would delete” and any inconsistencies.
-  - If SCCM cleanup is enabled, logs show SCCM cleanup summaries (obsolete/inactive deleted counts).
-- Web:
-  - Browse `https://<hostname>/` to view the dashboard.
-  - `https://<hostname>/api/snapshot` returns the current JSON.
-- Cross-check counts vs. expectations and confirm timestamps are current.
+These values are placeholders. Set the persistent environment for the actual
+service identity; variables in an interactive shell do not automatically become
+service configuration. Restart the service after configuration changes.
 
-10) Operations
-- Updating:
-  - Stop the Windows service and stop the IIS site.
-  - Copy new published files to `Worker` and `Web` folders (preserve `appsettings.*.json`).
-  - Start the service and start the site.
-- Backup: keep `appsettings.*.json` and `data` safe; logs are typically transient.
-- Troubleshooting:
-  - Worker: Windows Event Viewer (Application) and `C:\Apps\AdIntuneLedger\logs`.
-  - Web: IIS logs and application logs; check ANCM logs in the site’s `logs` if enabled.
-  - Validate environment variables resolved by checking process environment and log output.
+For ConfigMgr, set `HybridLedger__Sccm__Enabled=true` and an HTTPS URL ending in
+`/AdminService`, including any required CMG prefix. The client uses the service's
+Windows credentials unless explicit credentials are supplied securely. Redirects
+are disabled; pagination cannot leave the configured origin or service path.
+Both `v1.0/Device` and `wmi/SMS_R_System` must be readable. Validate their properties
+and AD GUID encoding against the actual site version.
 
-11) Alternative: single-server Kestrel (without IIS)
-- Web:
-  - Set `ASPNETCORE_URLS=https://+:5001` and install a certificate bound to port 5001.
-  - Run the web app as its own Windows service or Scheduled Task if desired.
-- Ensure firewall allows the chosen port and restrict access appropriately.
+## 4. Install the Windows Service
 
-12) Uninstalling
-- Worker: `sc stop "AdIntuneLedger.Worker"` then `sc delete "AdIntuneLedger.Worker"`.
-- Web: remove the IIS site and application pool.
+The worker registers Windows Service lifetime integration. Publish to its final
+directory, then use an elevated shell:
 
-Notes
-- Store secrets out of source control; prefer environment variables or a secure secret store available on servers.
-- Use least-privilege for service and app pool identities.
-- Ensure `data` is accessible to both components; use an absolute `HybridLedger:Snapshot:RootPath` to avoid working-directory issues.
-- Cleanup and SCCM modules are modular; leave disabled if not required.
+```powershell
+New-Service -Name 'NimbusLedger.Worker' `
+    -BinaryPathName '"C:\Apps\NimbusLedger\Worker\NimbusLedger.Worker.exe"' `
+    -StartupType Automatic
+```
+
+Configure the service identity and recovery through the organization's approved
+administration process. Do not paste service passwords into scripts, Git or logs.
+Start only after its environment and storage ACLs are configured.
+
+## 5. Protect the dashboard
+
+- Configure `WebAccess__AllowedGroups__0` with a real authorized Windows group.
+  Additional array indices allow additional groups. There is no default access.
+- Set `HybridLedger__Snapshot__RootPath` to the same absolute directory as the worker.
+- For IIS, enable Windows Authentication, disable anonymous application access and
+  use HTTPS. Server-level authentication can also protect the health routes, so
+  configure authenticated probes or a restricted health-check path as appropriate.
+- Kestrel uses Negotiate authentication. Validate Kerberos/SPNs and connection
+  affinity before placing a proxy in front of it; never replace authentication
+  with an untrusted identity header.
+- The application enforces the Windows-group policy on dashboard and snapshot API.
+  TLS alone is not authorization.
+
+## 6. Read-only acceptance checks
+
+1. Confirm exactly one worker can acquire the snapshot-directory execution lease.
+2. Compare all inventory counts and a representative sample of stable identities
+   against AD, Graph and ConfigMgr. Include renamed and re-enrolled devices.
+3. Exercise duplicates, FQDN/name differences, missing GUIDs and unknown activity.
+   Verify that ambiguous/name-only matches are visible and cannot authorize deletion.
+4. Interrupt a source and confirm no partial snapshot replaces the previous one.
+   Let the previous snapshot age and confirm `/health/ready` returns unhealthy.
+5. Verify unauthenticated and out-of-group requests cannot read inventory data.
+   Anonymous health responses must not disclose device records.
+6. Read the dashboard while publishing repeated snapshots. Confirm valid JSON,
+   no partial reads, correct retention and adequate disk capacity.
+7. Verify shutdown, restart, service recovery and log forwarding on the real host.
+
+## 7. Preview and execution gates
+
+Keep both dry-run flags true while testing cleanup. Configure explicit device GUID
+and ConfigMgr resource-ID allowlists, exclusions, inventory minimums and budgets.
+Defaults do not authorize cleanup of all old objects.
+
+Cloud planning requires `Cleanup:Enabled=true` plus the selected `DeleteIntune`
+and/or `DeleteEntra` flags. ConfigMgr planning additionally requires
+`Sccm:CleanupEnabled=true`. A deletion requires `Cleanup:DryRun=false`; ConfigMgr
+also requires `Sccm:DryRun=false`. Grant destructive permissions only after a
+reviewed preview matches the intended pilot scope.
+
+Each module has its own per-run count budget. Percentage limits are based on
+scoped inventory. `ObsoleteDaysThreshold` applies to last activity age; the source
+does not prove when the obsolete flag first changed.
+
+Execution recollects inventories, verifies the plan, writes a durable audit-start
+record and then calls the backend. Any preflight difference aborts the module.
+A failure after one successful operation cannot roll that operation back:
+investigate audit outcomes and backend state before proceeding.
+
+Missing AD objects are deliberately not auto-deleted from other systems. Supporting
+that case safely requires a separate approved lifecycle/tombstone process.
+
+## 8. Updates and recovery
+
+Stop the worker before replacing binaries. Back up configuration, snapshots and
+audit history with appropriate access controls. Preserve the service environment,
+restart, and repeat the read-only checks before re-enabling cleanup.
+
+Snapshot history retention does not rotate `cleanup-audit.jsonl`. Ship and retain
+the journal according to operational policy, monitoring disk usage. Its records
+are not cryptographically immutable.
+
+Do not describe this release as universally production-certified until the actual
+directory topology, permissions, API schemas, authentication and destructive pilot
+have been independently accepted.

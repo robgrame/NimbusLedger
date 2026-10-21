@@ -79,7 +79,7 @@ public sealed class LdapActiveDirectoryClient : IActiveDirectoryClient
                 var account = MapEntry(entry);
                 if (account is null)
                 {
-                    continue;
+                    throw new InvalidDataException("An LDAP computer entry could not be mapped; inventory is incomplete.");
                 }
 
                 results.Add(account);
@@ -96,6 +96,11 @@ public sealed class LdapActiveDirectoryClient : IActiveDirectoryClient
 
         return results;
     }
+
+    internal static DateTimeOffset? ParseLastLogonTimestamp(string? value) =>
+        long.TryParse(value, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out long fileTime) && fileTime > 0
+            ? DateTimeOffset.FromFileTime(fileTime) : null;
 
     private LdapConnection CreateConnection()
     {
@@ -158,10 +163,7 @@ public sealed class LdapActiveDirectoryClient : IActiveDirectoryClient
             if (entry.Attributes.Contains("lastLogonTimestamp"))
             {
                 var lastLogonValue = entry.Attributes["lastLogonTimestamp"].GetValues(typeof(string)).Cast<string?>().FirstOrDefault();
-                if (long.TryParse(lastLogonValue, out var fileTime))
-                {
-                    lastLogon = DateTimeOffset.FromFileTime(fileTime);
-                }
+                lastLogon = ParseLastLogonTimestamp(lastLogonValue);
             }
 
             DateTimeOffset? whenChanged = null;
@@ -169,6 +171,13 @@ public sealed class LdapActiveDirectoryClient : IActiveDirectoryClient
             {
                 var whenChangedValue = entry.Attributes["whenChanged"].GetValues(typeof(string)).Cast<string?>().FirstOrDefault();
                 if (DateTimeOffset.TryParse(whenChangedValue, out var parsed))
+                {
+                    whenChanged = parsed;
+                }
+                else if (DateTimeOffset.TryParseExact(whenChangedValue,
+                    ["yyyyMMddHHmmss'Z'", "yyyyMMddHHmmss'.0Z'"],
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out parsed))
                 {
                     whenChanged = parsed;
                 }

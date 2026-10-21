@@ -36,6 +36,9 @@ public sealed class GraphIntuneDeviceClient : IIntuneDeviceClient
             requestConfiguration.QueryParameters.Select = SelectFields;
         }, cancellationToken).ConfigureAwait(false);
 
+        HashSet<string> visited = [];
+        if (response is null)
+            throw new InvalidDataException("Intune inventory returned an empty response.");
         while (response is not null)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -46,7 +49,7 @@ public sealed class GraphIntuneDeviceClient : IIntuneDeviceClient
                 {
                     if (!Guid.TryParse(device.Id, out var deviceId))
                     {
-                        continue;
+                        throw new InvalidDataException("Intune inventory contains an invalid object ID.");
                     }
 
                     Guid? azureDeviceId = null;
@@ -73,7 +76,10 @@ public sealed class GraphIntuneDeviceClient : IIntuneDeviceClient
                 break;
             }
 
-            response = await _graphClient.DeviceManagement.ManagedDevices.WithUrl(response.OdataNextLink).GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!visited.Add(response.OdataNextLink))
+                throw new InvalidDataException("Intune inventory repeated a pagination link.");
+            response = await _graphClient.DeviceManagement.ManagedDevices.WithUrl(response.OdataNextLink).GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Intune inventory pagination returned an empty response.");
         }
 
         if (_logger.IsEnabled(LogLevel.Information))

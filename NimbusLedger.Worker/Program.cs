@@ -4,6 +4,7 @@ using Serilog;
 using NimbusLedger.Sccm;
 
 var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddWindowsService(options => options.ServiceName = "NimbusLedger.Worker");
 
 Log.Logger = new LoggerConfiguration()
 	.ReadFrom.Configuration(builder.Configuration)

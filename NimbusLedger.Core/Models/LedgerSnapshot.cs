@@ -10,7 +10,17 @@ public sealed record LedgerSnapshot(
     IReadOnlyList<DeviceRecord> IntuneDevices,
     IReadOnlyList<ComputerAccount> MissingInEntra,
     IReadOnlyList<ComputerAccount> MissingInIntune,
-    LedgerSnapshotMetrics Metrics);
+    LedgerSnapshotMetrics Metrics)
+{
+    public DateTimeOffset CollectionStartedAt { get; init; }
+    public bool InventoryComplete { get; init; }
+    public IReadOnlyList<ComputerAccount> AllActiveDirectoryComputers { get; init; } = [];
+    public IReadOnlyList<ConfigMgrDevice>? ConfigMgrDevices { get; init; }
+    public IReadOnlyList<ComputerAccount>? MissingInConfigMgr { get; init; }
+    public int AmbiguousMatches { get; init; }
+    public int NameOnlyMatches { get; init; }
+    public CleanupPlan? CleanupPlan { get; init; }
+}
 
 /// <summary>
 /// Pre-computed counters to simplify dashboard rendering.

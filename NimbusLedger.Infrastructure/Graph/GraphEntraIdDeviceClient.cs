@@ -15,7 +15,8 @@ public sealed class GraphEntraIdDeviceClient : IEntraIdDeviceClient
         "displayName",
         "operatingSystem",
         "operatingSystemVersion",
-        "approximateLastSignInDateTime"
+        "approximateLastSignInDateTime",
+        "trustType"
     ];
 
     private readonly GraphServiceClient _graphClient;
@@ -37,6 +38,9 @@ public sealed class GraphEntraIdDeviceClient : IEntraIdDeviceClient
             requestConfiguration.QueryParameters.Select = SelectFields;
         }, cancellationToken).ConfigureAwait(false);
 
+        HashSet<string> visited = [];
+        if (response is null)
+            throw new InvalidDataException("Entra inventory returned an empty response.");
         while (response is not null)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -47,7 +51,7 @@ public sealed class GraphEntraIdDeviceClient : IEntraIdDeviceClient
                 {
                     if (!Guid.TryParse(device.Id, out var deviceId))
                     {
-                        continue;
+                        throw new InvalidDataException("Entra inventory contains an invalid object ID.");
                     }
 
                     Guid? azureDeviceId = null;
@@ -63,7 +67,7 @@ public sealed class GraphEntraIdDeviceClient : IEntraIdDeviceClient
                         device.OperatingSystem,
                         device.OperatingSystemVersion,
                         device.ApproximateLastSignInDateTime,
-                        "EntraID");
+                        "EntraID") { TrustType = device.TrustType };
 
                     devices.Add(record);
                 }
@@ -74,7 +78,10 @@ public sealed class GraphEntraIdDeviceClient : IEntraIdDeviceClient
                 break;
             }
 
-            response = await _graphClient.Devices.WithUrl(response.OdataNextLink).GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!visited.Add(response.OdataNextLink))
+                throw new InvalidDataException("Entra inventory repeated a pagination link.");
+            response = await _graphClient.Devices.WithUrl(response.OdataNextLink).GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Entra inventory pagination returned an empty response.");
         }
 
         if (_logger.IsEnabled(LogLevel.Information))

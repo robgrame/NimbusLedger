@@ -26,6 +26,10 @@ public class IndexModel : PageModel
     public LedgerSnapshotMetrics? Metrics => Snapshot?.Metrics;
 
     public int ActivityWindowDays => _options.ActiveDirectory.ActivityWindowDays;
+    public bool SnapshotIsCurrent => Snapshot is not null && Snapshot.InventoryComplete
+        && Snapshot.CollectionStartedAt != default && Snapshot.CapturedAt >= Snapshot.CollectionStartedAt
+        && Snapshot.CapturedAt <= DateTimeOffset.UtcNow
+        && DateTimeOffset.UtcNow - Snapshot.CollectionStartedAt <= _options.Snapshot.MaxAge;
 
     public async Task<IActionResult> OnGetAsync(CancellationToken cancellationToken)
     {

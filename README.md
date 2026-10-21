@@ -1,109 +1,125 @@
-# AD-Intune Ledger
+# NimbusLedger
 
-A .NET 8 solution for monitoring hybrid-joined Windows clients across on-premises Active Directory, Microsoft Entra ID, and Microsoft Intune. The background worker reconciles device inventories and produces structured JSON snapshots that power a lightweight Razor Pages dashboard.
+Version **2.0.3** reconciles Windows device inventories across Active Directory,
+Microsoft Entra ID, Intune and optional Configuration Manager. A .NET 10 worker
+collects inventories, persists JSON snapshots and proposes narrowly scoped cleanup
+operations. A Windows-authenticated Razor Pages dashboard reads those snapshots.
 
-## Solution structure
+This release introduces breaking configuration and interface changes. It is a
+hardening baseline for laboratory and read-only pilot validation, not a claim that
+every production topology has been certified.
 
-| Project | Description |
+## Components
+
+| Project | Responsibility |
 | --- | --- |
-| `AdIntuneLedger.Core` | Domain models, configuration options, and abstractions shared across the solution. |
-| `AdIntuneLedger.Infrastructure` | Implementations for Active Directory (LDAP), Microsoft Graph, reconciliation logic, and JSON snapshot storage. |
-| `AdIntuneLedger.Worker` | Background worker service that executes the reconciliation pipeline on a configurable schedule and emits structured logs. |
-| `AdIntuneLedger.Web` | Razor Pages dashboard and API endpoint for inspecting the latest reconciliation snapshot. |
-| `AdIntuneLedger.Sccm` | Optional module for SCCM (ConfigMgr) cleanup through the Admin Service. |
+| `NimbusLedger.Core` | Inventory models, shared identity matching and contracts. |
+| `NimbusLedger.Infrastructure` | Paged LDAP/Graph inventories, reconciliation, cloud cleanup planning and storage. |
+| `NimbusLedger.Sccm` | Paged AdminService inventories, discovered AD GUID correlation and guarded cleanup. |
+| `NimbusLedger.Worker` | Windows Service hosting, scheduling and single-writer execution lease. |
+| `NimbusLedger.Web` | Authorized dashboard, snapshot API and health endpoints. |
+| `NimbusLedger.Tests` | Deterministic regression tests; no live tenant or directory access. |
 
-## Prerequisites
+## Identity and inventory boundaries
 
-- .NET 8 Runtime/SDK (preview channel). `Serilog`, `Azure.Identity`, and `Microsoft.Graph` are restored via NuGet.
-- Network access to a domain controller supporting LDAP/LDAPS for Active Directory queries.
-- A Microsoft Entra ID / Intune tenant with permissions to query Microsoft Graph. Ensure the identity used has sufficient permissions for any optional delete operations you enable.
+- Stable GUID matches take precedence. Computer account names, FQDNs and trailing
+  `$` are normalized for reporting, but **a name-only match never authorizes deletion**.
+- Duplicate matches are explicitly ambiguous instead of being treated as proof of presence.
+- Entra object IDs, Entra device IDs and Intune managed-device IDs remain separate.
+- ConfigMgr combines `v1.0/Device` activity data with AD `ObjectGUID` discovery
+  from `wmi/SMS_R_System`. Missing discovery GUIDs allow name-only reporting but
+  cannot authorize ConfigMgr cleanup.
+- A source failure aborts reconciliation. The previous snapshot remains available
+  with its original timestamp; it is not relabelled as current.
+- ConfigMgr is optional. A disabled source is represented as not collected, not
+  as a successfully collected empty inventory.
+
+## Build and test
+
+Install a stable .NET 10 SDK, then run from the repository root:
+
+```powershell
+dotnet build NimbusLedger.sln -c Release
+dotnet test NimbusLedger.Tests\NimbusLedger.Tests.csproj -c Release
+```
+
+CI runs the same regressions on Windows and Linux and checks transitive dependency
+advisories. This does not replace live LDAP, Graph, Kerberos and AdminService tests.
 
 ## Configuration
 
-Both the worker and web projects read a shared `HybridLedger` section (see `appsettings.json`). Key properties:
+Both executable projects read standard .NET configuration providers. Keep secrets
+out of tracked settings; use environment variables or an approved secret provider.
+The worker's `HybridLedger` options include:
 
-```json
-"HybridLedger": {
-  "ActiveDirectory": {
-    "LdapServer": "dc1.contoso.com",
-    "Port": 636,
-    "UseSsl": true,
-    "BaseDn": "DC=contoso,DC=com",
-    "ActivityWindowDays": 30,
-    "Username": null,
-    "Password": null
-  },
-  "Graph": {
-    "TenantId": "00000000-0000-0000-0000-000000000000",
-    "Scopes": [ "https://graph.microsoft.com/.default" ]
-  },
-  "Snapshot": {
-    "RootPath": "data",
-    "LatestFileName": "latest-snapshot.json"
-  },
-  "Scheduler": {
-    "Interval": "01:00:00",
-    "StartupDelay": "00:00:10"
-  },
-  "Cleanup": {
-    "Enabled": false,
-    "DeleteEntra": false,
-    "DeleteIntune": false,
-    "DryRun": true,
-    "IntuneFreshWindowDays": 30
-  },
-  "Sccm": {
-    "Enabled": false,
-    "AdminServiceBaseUrl": "https://cmserver.contoso.com/CCM_Proxy_ServerAuth/",
-    "InactiveDaysThreshold": 90,
-    "ObsoleteDaysThreshold": 7
-  }
-}
+| Section | Important settings |
+| --- | --- |
+| `ActiveDirectory` | `LdapServer`, `BaseDn`, `Port=636`, `UseSsl=true`, `ActivityWindowDays>=14`. Certificate validation is mandatory. |
+| `Graph` | Tenant and client identity, `.default` scope; managed identity or app-only credentials with least privilege. |
+| `Snapshot` | Shared absolute `RootPath`, `LatestFileName`, positive `HistorySize` and `MaxAge`. |
+| `Scheduler` | `StartupDelay` and collection `Interval`. |
+| `Cleanup` | Disabled by default; `DryRun=true`. Explicit `AllowedAzureAdDeviceIds`, exclusions, inventory minimums, age limits and deletion budgets. |
+| `Sccm` | `Enabled=false`; full HTTPS `AdminServiceBaseUrl`. Separate cleanup enablement, dry-run flag and explicit resource-ID allowlist. |
+
+For the web application, configure at least one authorized Windows group:
+
+```powershell
+$env:WebAccess__AllowedGroups__0 = 'EXAMPLE\LedgerReaders'
+$env:HybridLedger__Snapshot__RootPath = 'C:\Apps\NimbusLedger\data'
+dotnet run --project NimbusLedger.Web
 ```
 
-- Provide domain credentials via the Windows credential store, environment variables, or a secure secret provider; never hard-code sensitive values.
-- `DefaultAzureCredential` respects managed identity, workload identity, Visual Studio/CLI credentials, etc. Ensure the identity has the necessary Microsoft Graph application permissions for any delete operations you enable.
-- Cleanup module: when enabled, the worker deletes Entra/Intune devices whose AD counterparts are stale or missing, except when the Intune device has a recent check-in (within `IntuneFreshWindowDays`). In that case, no deletion occurs and an inconsistency is logged. Defaults to `DryRun=true`.
-- The worker writes structured logs to `logs/worker-*.json` and snapshots to `data/latest-snapshot.json`. The web app reads snapshots from the same directory.
-- SCCM cleanup is optional and disabled by default. Enable by setting `HybridLedger:Sccm:Enabled=true` and configuring `AdminServiceBaseUrl`.
+These are illustrative placeholders, not infrastructure defaults. An empty group
+list prevents startup. There is no anonymous-development bypass.
 
-## Running locally
+## Cleanup safety contract
 
-1. Restore and build the solution:
+Start with read-only permissions and both cleanup modules disabled. A preview
+requires explicit scope; execution additionally requires all applicable dry-run
+flags to be disabled intentionally.
 
-   ```powershell
-   dotnet build
-   ```
+Cloud cleanup requires an allowlisted Windows hybrid-joined Entra device, a unique
+stable AD identity, known old AD activity and change timestamps, and exactly one
+linked Intune record with known old activity. Recent Entra sign-in activity also
+protects the device. Missing AD objects, cloud-only devices, unknown timestamps
+and name-only matches are not deletion authority. Zero LDAP FILETIME and pre-epoch
+sentinel timestamps are unknown activity, not evidence that a device is old.
 
-2. Update `appsettings.Development.json` (worker & web) with environment-specific settings. Consider using [user secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets) during development.
+ConfigMgr cleanup additionally requires an allowlisted resource ID and its
+discovered AD object GUID. The inactive/obsolete flag is combined with
+`LastActiveTime`; `ObsoleteDaysThreshold` means minimum activity age, not proven
+time spent in the obsolete state.
 
-3. Start the worker to generate snapshots:
+Both modules reject incomplete, stale, oversized or ambiguous plans. Budgets are
+per module and per run; cloud operation count includes each Intune and Entra delete.
+The percentage limit uses the explicit scoped inventory, not the entire tenant.
+No oversized plan is silently truncated. Defaults are five operations and five
+percent, so a small pilot scope normally needs an explicit percentage adjustment.
 
-   ```powershell
-   dotnet run --project src/AdIntuneLedger.Worker
-   ```
+Before execution, inventories are recollected and the proposed targets must remain
+unchanged. Intune deletion precedes Entra deletion. `cleanup-audit.jsonl` is flushed
+before and after each destructive call; failure to write the initial audit record
+prevents the call. A `Started` record without `Completed` represents an uncertain
+outcome requiring investigation. Transport failures and interruptions additionally
+record `OutcomeUnknown` when audit storage remains available; that is not proof
+that the backend did not apply the operation. This local journal is **not immutable or
+tamper-proof**, and an external change can still occur after preflight.
 
-4. Launch the web dashboard in a separate terminal:
+## Storage and health
 
-   ```powershell
-   dotnet run --project src/AdIntuneLedger.Web
-   ```
+Worker and dashboard must use the same snapshot directory. Only one worker may
+hold its `.worker.lock` lease at a time. Snapshots are published by same-filesystem
+replacement, not in-place truncation. Readers allow delete sharing and bounded
+retries for Windows replacement locks.
 
-5. Navigate to `https://localhost:5001` (or the configured URL) to review counts, gaps, and export JSON via `/api/snapshot`.
+- `/` and `/api/snapshot`: Windows authentication plus an allowed group.
+- `/health/live`: anonymous process liveness, no inventory data.
+- `/health/ready`: anonymous status only; healthy requires a complete current snapshot.
 
-## Deployment
+The web identity needs read access only. The worker needs modify access to snapshot,
+history, lease and audit files. Use a trusted local filesystem or explicitly
+validate atomic replacement and locking semantics on the chosen SMB storage.
 
-For step-by-step on-premises deployment (no Azure services), see `docs/DEPLOYMENT.md`. It covers installing the worker as a Windows Service and hosting the web app on IIS, configuration, permissions, firewall, validation, and operations, plus optional SCCM and cleanup configuration.
-
-## Observability
-
-- Structured JSON logs (Serilog) simplify ingestion into centralized logging.
-- Each reconciliation persists a timestamped snapshot in `data/` for historical comparisons.
-- The dashboard surfaces current counts and missing-device tables for quick remediation.
-
-## Next steps
-
-- Integrate a secure secret provider for LDAP/Graph credentials.
-- Add alerting when discrepancies or cleanup inconsistencies are detected.
-- Extend the dashboard with filtering and search capabilities.
-- Publish containers or Windows services for production deployment.
+See `docs/DEPLOYMENT.md` for installation and pilot acceptance checks. No Azure
+resources are provisioned automatically. The repository does not currently declare
+a project-wide license; third-party frontend notices are not a license for this code.

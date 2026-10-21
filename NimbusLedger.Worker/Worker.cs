@@ -2,6 +2,8 @@ using NimbusLedger.Core.Abstractions;
 using NimbusLedger.Core.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NimbusLedger.Sccm.Abstractions;
+using NimbusLedger.Sccm.Options;
 
 namespace NimbusLedger.Worker;
 
@@ -11,17 +13,26 @@ public sealed class LedgerWorker : BackgroundService
     private readonly ICleanupService _cleanupService;
     private readonly HybridLedgerOptions _options;
     private readonly ILogger<LedgerWorker> _logger;
+    private readonly IServiceProvider _services;
+    private readonly SccmCleanupOptions _configMgrOptions;
 
-    public LedgerWorker(ILedgerService ledgerService, ICleanupService cleanupService, IOptions<HybridLedgerOptions> options, ILogger<LedgerWorker> logger)
+    public LedgerWorker(ILedgerService ledgerService, ICleanupService cleanupService, IOptions<HybridLedgerOptions> options,
+        ILogger<LedgerWorker> logger, IServiceProvider services, IOptions<SccmCleanupOptions> configMgrOptions)
     {
         _ledgerService = ledgerService ?? throw new ArgumentNullException(nameof(ledgerService));
         _cleanupService = cleanupService ?? throw new ArgumentNullException(nameof(cleanupService));
         _options = options.Value;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _services = services;
+        _configMgrOptions = configMgrOptions.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        Directory.CreateDirectory(_options.Snapshot.RootPath);
+        using FileStream lease = new(Path.Combine(_options.Snapshot.RootPath, ".worker.lock"),
+            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        _logger.LogInformation("Worker acquired exclusive execution lease in snapshot directory {Path}", _options.Snapshot.RootPath);
         var startupDelay = _options.Scheduler.StartupDelay;
         if (startupDelay > TimeSpan.Zero)
         {
@@ -50,7 +61,9 @@ public sealed class LedgerWorker : BackgroundService
                         snapshot.Metrics.MissingInIntuneCount);
                 }
 
-                // Perform optional cleanup according to rules/options
+                if (_configMgrOptions.Enabled && _configMgrOptions.CleanupEnabled)
+                    await _services.GetRequiredService<ISccmCleanupService>()
+                        .PerformCleanupAsync(snapshot, stoppingToken).ConfigureAwait(false);
                 await _cleanupService.PerformCleanupAsync(snapshot, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

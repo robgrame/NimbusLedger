@@ -17,4 +17,7 @@ public sealed record DeviceRecord(
     string? OperatingSystem,
     string? OperatingSystemVersion,
     DateTimeOffset? LastSyncDateTime,
-    string Source);
+    string Source)
+{
+    public string? TrustType { get; init; }
+}

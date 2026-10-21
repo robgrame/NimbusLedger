@@ -19,4 +19,5 @@ public sealed class SnapshotOptions
     /// Maximum number of historical snapshots to retain.
     /// </summary>
     public int HistorySize { get; set; } = 10;
+    public TimeSpan MaxAge { get; set; } = TimeSpan.FromHours(2);
 }

@@ -13,6 +13,30 @@
             <p class="text-muted">Last reconciled @Model.Snapshot.CapturedAt.ToLocalTime().ToString("f")</p>
         }
     </header>
+    @if (Model.Snapshot is not null)
+    {
+        @if (!Model.SnapshotIsCurrent)
+        {
+            <div class="alert alert-danger" role="alert">Inventory is incomplete or stale. Do not use this snapshot to authorize cleanup.</div>
+        }
+        @if (Model.Snapshot.AmbiguousMatches > 0 || Model.Snapshot.NameOnlyMatches > 0)
+        {
+            <div class="alert alert-warning" role="alert">
+                Identity review required: @Model.Snapshot.AmbiguousMatches ambiguous matches;
+                @Model.Snapshot.NameOnlyMatches name-only matches. Name-only matches do not authorize cloud deletion.
+            </div>
+        }
+        @if (Model.Snapshot.ConfigMgrDevices is not null)
+        {
+            <p>ConfigMgr inventory: @Model.Snapshot.ConfigMgrDevices.Count devices;
+                @(Model.Snapshot.MissingInConfigMgr?.Count ?? 0) AD devices missing or ambiguous in ConfigMgr.</p>
+        }
+        @if (Model.Snapshot.CleanupPlan is not null)
+        {
+            <p>Cloud cleanup plan: @Model.Snapshot.CleanupPlan.Actions.Count proposed operations,
+                @Model.Snapshot.CleanupPlan.Blockers.Count blocking conditions. A plan is not evidence of execution.</p>
+        }
+    }
 
     @if (Model.Snapshot is null)
     {

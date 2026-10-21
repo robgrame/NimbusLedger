@@ -6,94 +6,80 @@ using Microsoft.Extensions.Options;
 
 namespace NimbusLedger.Infrastructure.Services;
 
-public sealed class CleanupService : ICleanupService
+public sealed class CleanupService(
+    IEntraIdDeviceClient entra,
+    IIntuneDeviceClient intune,
+    IActiveDirectoryClient activeDirectory,
+    ICleanupPlanner planner,
+    IOptions<HybridLedgerOptions> options,
+    ILogger<CleanupService> logger,
+    ICleanupAuditLog auditLog) : ICleanupService
 {
-    private readonly IEntraIdDeviceClient _entra;
-    private readonly IIntuneDeviceClient _intune;
-    private readonly HybridLedgerOptions _options;
-    private readonly ILogger<CleanupService> _logger;
-
-    public CleanupService(IEntraIdDeviceClient entra, IIntuneDeviceClient intune, IOptions<HybridLedgerOptions> options, ILogger<CleanupService> logger)
-    {
-        _entra = entra;
-        _intune = intune;
-        _options = options.Value;
-        _logger = logger;
-    }
-
     public async Task PerformCleanupAsync(LedgerSnapshot snapshot, CancellationToken cancellationToken)
     {
-        if (!_options.Cleanup.Enabled)
+        if (!options.Value.Cleanup.Enabled)
         {
-            _logger.LogInformation("Cleanup disabled. Skipping.");
+            logger.LogInformation("Cloud cleanup disabled.");
             return;
         }
-
-        var intuneFreshCutoff = DateTimeOffset.UtcNow.AddDays(-_options.Cleanup.IntuneFreshWindowDays);
-
-        // Build quick lookups by AzureADDeviceId for Intune recency check
-        var intuneByAzureId = snapshot.IntuneDevices
-            .Where(d => d.AzureAdDeviceId.HasValue)
-            .GroupBy(d => d.AzureAdDeviceId!.Value)
-            .ToDictionary(g => g.Key, g => g.Max(d => d.LastSyncDateTime));
-
-        // Protective rule on cloud deletions: Only delete when Intune is NOT fresh.
-        if (_options.Cleanup.DeleteEntra)
+        CleanupPlan plan = planner.CreatePlan(snapshot);
+        if (plan.Blockers.Count > 0)
         {
-            foreach (var entra in snapshot.EntraDevices)
-            {
-                bool adActive = IsAdActiveCounterpartPresent(entra, snapshot.ActiveDirectoryComputers);
-                if (adActive) continue;
-
-                bool intuneFresh = entra.AzureAdDeviceId.HasValue
-                    && intuneByAzureId.TryGetValue(entra.AzureAdDeviceId.Value, out var lastSync)
-                    && lastSync.HasValue && lastSync.Value >= intuneFreshCutoff;
-
-                if (intuneFresh)
-                {
-                    _logger.LogWarning("Inconsistency: AD stale/missing but Intune fresh for AzureAdDevice {AzureId}; Entra deletion suppressed", entra.AzureAdDeviceId);
-                    continue;
-                }
-
-                if (!_options.Cleanup.DryRun)
-                {
-                    await _entra.DeleteDeviceAsync(entra.Id, cancellationToken).ConfigureAwait(false);
-                }
-                _logger.LogInformation("{Action} Entra device {Name} ({Id}) due to stale/missing AD and no fresh Intune check-in",
-                    _options.Cleanup.DryRun ? "Would delete" : "Deleted", entra.DisplayName, entra.Id);
-            }
+            logger.LogWarning("Cloud cleanup blocked: {Reasons}", string.Join(" ", plan.Blockers));
+            return;
         }
-
-        if (_options.Cleanup.DeleteIntune)
+        if (!options.Value.Cleanup.DryRun && plan.Actions.Count > 0)
         {
-            foreach (var md in snapshot.IntuneDevices)
+            DateTimeOffset started = DateTimeOffset.UtcNow;
+            IReadOnlyList<ComputerAccount> ad = await activeDirectory.GetComputersAsync(cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<DeviceRecord> cloud = await entra.GetDevicesAsync(cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<DeviceRecord> managed = await intune.GetManagedDevicesAsync(cancellationToken).ConfigureAwait(false);
+            LedgerSnapshot revalidated = snapshot with
             {
-                bool adActive = IsAdActiveCounterpartPresent(md, snapshot.ActiveDirectoryComputers);
-                if (adActive) continue;
-
-                bool intuneFresh = md.LastSyncDateTime.HasValue && md.LastSyncDateTime.Value >= intuneFreshCutoff;
-                if (intuneFresh)
-                {
-                    _logger.LogWarning("Inconsistency: AD stale/missing but Intune fresh for ManagedDevice {Id}; Intune deletion suppressed", md.Id);
-                    continue;
-                }
-
-                if (!_options.Cleanup.DryRun)
-                {
-                    await _intune.DeleteManagedDeviceAsync(md.Id, cancellationToken).ConfigureAwait(false);
-                }
-                _logger.LogInformation("{Action} Intune device {Name} ({Id}) due to stale/missing AD and no fresh Intune check-in",
-                    _options.Cleanup.DryRun ? "Would delete" : "Deleted", md.DisplayName, md.Id);
-            }
+                CollectionStartedAt = started,
+                CapturedAt = DateTimeOffset.UtcNow,
+                AllActiveDirectoryComputers = ad,
+                EntraDevices = cloud,
+                IntuneDevices = managed
+            };
+            CleanupPlan fresh = planner.CreatePlan(revalidated);
+            if (fresh.Blockers.Count > 0 || !plan.Actions.ToHashSet().SetEquals(fresh.Actions))
+                throw new InvalidOperationException("Cloud cleanup preflight changed or failed; no actions executed.");
         }
-    }
-
-    private static bool IsAdActiveCounterpartPresent(DeviceRecord cloud, IReadOnlyList<ComputerAccount> activeAd)
-    {
-        if (cloud.AzureAdDeviceId.HasValue && activeAd.Any(a => a.AzureAdDeviceId == cloud.AzureAdDeviceId))
-            return true;
-        if (!string.IsNullOrWhiteSpace(cloud.DisplayName) && activeAd.Any(a => string.Equals(a.DnsHostName, cloud.DisplayName, StringComparison.OrdinalIgnoreCase) || string.Equals(a.SamAccountName, cloud.DisplayName, StringComparison.OrdinalIgnoreCase)))
-            return true;
-        return false;
+        foreach (CleanupAction action in plan.Actions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (options.Value.Cleanup.DryRun)
+            {
+                logger.LogInformation("Would delete {Source} object {ObjectId}; device {DeviceId}", action.Source, action.DeviceId, action.AzureAdDeviceId);
+                continue;
+            }
+            logger.LogWarning("Executing approved-scope deletion of {Source} object {ObjectId}", action.Source, action.DeviceId);
+            await auditLog.WriteAsync(action.Source, action.DeviceId.ToString(), "Started", cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (action.Source == "Intune")
+                    await intune.DeleteManagedDeviceAsync(action.DeviceId, cancellationToken).ConfigureAwait(false);
+                else if (action.Source == "EntraID")
+                    await entra.DeleteDeviceAsync(action.DeviceId, cancellationToken).ConfigureAwait(false);
+                else
+                    throw new InvalidOperationException("Unsupported cleanup action source.");
+            }
+            catch (Exception exception) when (exception is Microsoft.Kiota.Abstractions.ApiException or HttpRequestException or OperationCanceledException)
+            {
+                try
+                {
+                    await auditLog.WriteAsync(action.Source, action.DeviceId.ToString(), "OutcomeUnknown", CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception auditException) when (auditException is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogError(auditException, "Could not record an uncertain cleanup outcome; inspect the Started audit entry.");
+                }
+                logger.LogError(exception, "Deletion failed or was interrupted; backend outcome must be verified.");
+                throw;
+            }
+            await auditLog.WriteAsync(action.Source, action.DeviceId.ToString(), "Completed", cancellationToken).ConfigureAwait(false);
+            logger.LogInformation("Deleted {Source} object {ObjectId}", action.Source, action.DeviceId);
+        }
     }
 }
